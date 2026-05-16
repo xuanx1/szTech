@@ -161,15 +161,22 @@ function getProfile(districtId, embedding) {
 }
 
 // Year share — real per-year proportions derived from WIPO PatentScope's
-// FP:(shenzhen) result list (10k PCT records, exported 16 May 2026). Loaded
-// at runtime from wipo-corpus.js. Fallback (if wipo-corpus.js is missing) is
-// a uniform 1/6 split rather than fabricated growth.
+// FP:(shenzhen) result list. Loaded at runtime from wipo-corpus.js.
 const YEAR_FRACTION = (() => {
   const w = (typeof window !== "undefined") && window.WIPO_CORPUS;
   const real = w && w.year_fraction_window;
   if (real) return { ...real, "all": 1.00 };
+  // No corpus loaded — degrade to a uniform split over a placeholder window
+  // rather than fabricate growth.
   return { "2019": 1/6, "2020": 1/6, "2021": 1/6, "2022": 1/6, "2023": 1/6, "2024": 1/6, "all": 1.00 };
 })();
+
+// Corpus year range — derived from whatever years the loaded corpus actually
+// covers, so display labels track the data rather than a hardcoded window.
+const CORPUS_YEARS = Object.keys(YEAR_FRACTION).filter(k => k !== "all").sort();
+const CORPUS_YEAR_RANGE = CORPUS_YEARS.length
+  ? `${CORPUS_YEARS[0]} — ${CORPUS_YEARS[CORPUS_YEARS.length - 1]}`
+  : "—";
 
 // Alternate palettes — same 12 cluster ids, different hue families.
 const PALETTES = {
@@ -188,7 +195,10 @@ const PALETTES = {
 function paletteColor(clusterId, palette) {
   const map = PALETTES[palette];
   if (map && map[clusterId]) return map[clusterId];
-  return CLUSTER_BY_ID[clusterId].color;
+  const c = CLUSTER_BY_ID[clusterId];
+  // Some WIPO records have no IPC-mapped cluster — surface them with the
+  // neutral accent rather than throw a TypeError mid-render.
+  return c ? c.color : "var(--accent)";
 }
 
 // Filing count after year slicing and normalization.
@@ -474,7 +484,7 @@ function RunMeta({ t }) {
     <div className="runmeta">
       <div className="runmeta-row">
         <span className="runmeta-k">{L(t, "corpus")}</span>
-        <span className="runmeta-v">2019 → 2024</span>
+        <span className="runmeta-v">{CORPUS_YEAR_RANGE}</span>
       </div>
       <div className="runmeta-row">
         <span className="runmeta-k">k-means</span>
@@ -769,11 +779,14 @@ function MapPanel(props) {
       .filter(([, pts]) => pts.length >= 4)
       .map(([cid, pts]) => ({
         cluster: cid,
-        path: orderViaMST(pts),
+        // Prefer the real migration trajectory: per-year, weighted average of
+        // district centroids by WIPO migration_share. Falls back to the
+        // space-time MST through the scatter when no migration data exists.
+        path: migrationPath(cid, centroids) || orderViaMST(pts),
         count: pts.length,
       }))
       .sort((a, b) => b.count - a.count);
-  }, [projectedPoints]);
+  }, [projectedPoints, centroids]);
 
   return (
     <div className="map-wrap">
@@ -1038,7 +1051,7 @@ function MapFootbar({ t, pointCount, source }) {
   const srcLabel = source === "aliyun"
     ? "Aliyun DataV (440300) · CNIPA · live"
     : "Aliyun DataV (440300) · CNIPA · local";
-  const yearLabel = year === "all" ? "2019—2024" : year;
+  const yearLabel = year === "all" ? CORPUS_YEAR_RANGE : year;
   const normLabel = normalize === "raw" ? "" : (normalize === "per_capita" ? " · /10k pop" : " · /km²");
   return (
     <div className="map-foot">
@@ -1179,7 +1192,7 @@ function OverviewPanel({ t, visibleClusters }) {
       <div className="kpi">
         <div className="kpi-k">{L(t, t.dataset + "s")} {L(t, "embeddedSuffix")} {unit && <span style={{opacity:.6}}>· {unit}</span>}</div>
         <div className="kpi-v"><Num n={Math.round(total)}/></div>
-        <div className="kpi-sub">{year === "all" ? "2019 — 2024" : year} · CNIPA Shenzhen</div>
+        <div className="kpi-sub">{year === "all" ? CORPUS_YEAR_RANGE : year} · CNIPA Shenzhen</div>
       </div>
 
       <div className="section-h">{L(t, "topDistricts")}</div>
@@ -1437,11 +1450,44 @@ function hashSeed(s) {
   return h >>> 0;
 }
 
+// ─── Migration trajectory: real per-year per-district shares ───────────────
+
+// For each cluster, weight the projected district centroids by the real
+// migration_share[cluster][year][district] (from WIPO_CORPUS) and emit one
+// point per year. The chronological chain of weighted centroids = literal
+// "where the cluster's filings concentrated in each year". Returns null when
+// no migration data is available for that cluster (falls back to MST).
+function migrationPath(clusterId, districtCentroids) {
+  const corpus = (typeof window !== 'undefined') && window.WIPO_CORPUS;
+  if (!corpus || !corpus.migration_share || !corpus.migration_share[clusterId]) return null;
+  const ms = corpus.migration_share[clusterId];
+  const years = CORPUS_YEARS;
+  const out = [];
+  for (const y of years) {
+    const shares = ms[y];
+    if (!shares) continue;
+    let sx = 0, sy = 0, sw = 0;
+    for (const [district, w] of Object.entries(shares)) {
+      const c = districtCentroids[district];
+      if (!c) continue;
+      sx += c[0] * w; sy += c[1] * w; sw += w;
+    }
+    if (sw > 0) out.push([sx / sw, sy / sw]);
+  }
+  return out.length >= 2 ? out : null;
+}
+
 // ─── Semantic rivers: MST-diameter routing through scatter points ──────────
 
-// Order scatter points along the spine of their cluster by building a
-// minimum spanning tree (Prim, O(n²)) then finding its diameter via two
-// BFS passes. The diameter path = the natural "main channel" of the river.
+// Order scatter points along the diameter of a SPACE-TIME minimum spanning
+// tree. Each point lives in (x, y, year*T_SCALE); MST edges weight by squared
+// 3-D distance, then the diameter is the longest hop path. The output curve
+// therefore traces the cluster's longest space-time spine — read as
+// "the cluster migrated from (here, oldest) to (there, newest)".
+//
+// T_SCALE expresses 1 year as a spatial distance in projected pixels. Picked
+// from each cluster's own geographic spread so time and space contribute
+// comparably regardless of how concentrated the cluster is.
 function orderViaMST(points) {
   let pts = points;
   if (pts.length > 160) {
@@ -1451,16 +1497,34 @@ function orderViaMST(points) {
   const N = pts.length;
   if (N < 2) return pts.map(p => [p.x, p.y]);
 
-  // Prim's MST (dense). closestU[v] = u for not-yet-in-MST v.
+  // Compute T_SCALE adaptively: average half-extent of the point cloud
+  // divided by the year-range, scaled up so time is weighted ~equal to space.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  let minT = Infinity, maxT = -Infinity, anyYear = false;
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    if (p.year) { anyYear = true; if (p.year < minT) minT = p.year; if (p.year > maxT) maxT = p.year; }
+  }
+  const halfExtent = ((maxX - minX) + (maxY - minY)) * 0.5;
+  const yearRange = anyYear ? Math.max(1, maxT - minT) : 1;
+  const T_SCALE = anyYear ? halfExtent / yearRange : 0;
+  const pt = pts.map(p => (p.year || 0) * T_SCALE);
+
+  const sqd = (i, j) => {
+    const dx = pts[i].x - pts[j].x;
+    const dy = pts[i].y - pts[j].y;
+    const dt = pt[i] - pt[j];
+    return dx*dx + dy*dy + dt*dt;
+  };
+
+  // Prim's MST (dense) over space-time distance.
   const inMST = new Array(N).fill(false);
   const adj = Array.from({ length: N }, () => []);
   const bestDist = new Array(N).fill(Infinity);
   const bestSrc  = new Array(N).fill(0);
   inMST[0] = true;
-  for (let v = 1; v < N; v++) {
-    const dx = pts[0].x - pts[v].x, dy = pts[0].y - pts[v].y;
-    bestDist[v] = dx*dx + dy*dy;
-  }
+  for (let v = 1; v < N; v++) bestDist[v] = sqd(0, v);
   for (let k = 1; k < N; k++) {
     let pick = -1, pickD = Infinity;
     for (let v = 0; v < N; v++) {
@@ -1472,13 +1536,12 @@ function orderViaMST(points) {
     adj[bestSrc[pick]].push(pick);
     for (let v = 0; v < N; v++) {
       if (inMST[v]) continue;
-      const dx = pts[pick].x - pts[v].x, dy = pts[pick].y - pts[v].y;
-      const d = dx*dx + dy*dy;
+      const d = sqd(pick, v);
       if (d < bestDist[v]) { bestDist[v] = d; bestSrc[v] = pick; }
     }
   }
 
-  // Two-pass BFS to find diameter
+  // Two-pass BFS to find tree diameter (hop count).
   function farthest(start) {
     const dist = new Array(N).fill(-1);
     const parent = new Array(N).fill(-1);
@@ -1498,26 +1561,23 @@ function orderViaMST(points) {
   }
   const a = farthest(0).far;
   const { far: b, parent } = farthest(a);
-  // Reconstruct the diameter path. Walk from b back to a via parents.
   const idxPath = [];
   for (let cur = b; cur !== -1; cur = parent[cur]) idxPath.push(cur);
-  // Orient chronologically: if the end of the path (a) carries a younger
-  // average year than the start (b), reverse so the curve runs old→new and
-  // the animated wave flows in the direction of innovation growth. Uses
-  // average over the first/last 5 vertices to denoise per-point year noise.
-  // Falls back to identity if points carry no year (WIPO corpus missing).
-  const avgYear = (slice) => {
-    let s = 0, n = 0;
-    for (const i of slice) { const y = pts[i].year; if (y) { s += y; n++; } }
-    return n ? s / n : null;
-  };
-  const head = idxPath.slice(0, 5);
-  const tail = idxPath.slice(-5);
-  const yHead = avgYear(head), yTail = avgYear(tail);
-  // idxPath[0..4] = head (near endpoint b); idxPath[-5..] = tail (near a).
-  // The animated wave runs idxPath[0] → idxPath[last]; we want OLD → NEW,
-  // so reverse when the head is newer than the tail.
-  if (yHead != null && yTail != null && yHead > yTail) idxPath.reverse();
+
+  // Orient old→new: reverse if path head's mean year is newer than tail's.
+  // (Same logic as before; the underlying MST has now been built in space-time
+  // so the diameter already prefers moving across years, but we still need to
+  // pick which of the two endpoints is the start.)
+  if (anyYear) {
+    const avgYear = (slice) => {
+      let s = 0, n = 0;
+      for (const i of slice) { const y = pts[i].year; if (y) { s += y; n++; } }
+      return n ? s / n : null;
+    };
+    const yHead = avgYear(idxPath.slice(0, 5));
+    const yTail = avgYear(idxPath.slice(-5));
+    if (yHead != null && yTail != null && yHead > yTail) idxPath.reverse();
+  }
   return idxPath.map(i => [pts[i].x, pts[i].y]);
 }
 
@@ -1631,20 +1691,13 @@ function phrasesFor(cid) {
   return M[cid] || [];
 }
 
+// Real top assignees per district — sourced from WIPO_CORPUS.assignees_by_district,
+// derived from the FP:(shenzhen) PCT corpus + public HQ→district mapping.
+// Falls back to empty array if the corpus is missing.
 function assigneesFor(districtId) {
-  const M = {
-    nanshan:   [{name:"Tencent Tech (Shenzhen) Co.",cluster:"ai",n:8420},{name:"SF Express",cluster:"logistics",n:1240},{name:"DJI Innovations",cluster:"robotics",n:2810},{name:"ZhongDa Technology",cluster:"semi",n:1640},{name:"Kingsoft Office",cluster:"ai",n:480}],
-    futian:    [{name:"Ping An Financial Tech",cluster:"fintech",n:6240},{name:"WeBank",cluster:"fintech",n:2810},{name:"Mindray Bio-Medical",cluster:"medtech",n:1820},{name:"China Merchants Bank",cluster:"fintech",n:1240},{name:"SF Insurance",cluster:"fintech",n:480}],
-    luohu:     [{name:"Shenzhen Jewelry Group",cluster:"consumer",n:820},{name:"Luohu Trade Holdings",cluster:"logistics",n:640},{name:"Skyworth RGB Electronics",cluster:"consumer",n:1240},{name:"Coland Tech",cluster:"urban",n:380}],
-    yantian:   [{name:"Yantian International Container",cluster:"logistics",n:920},{name:"COSCO Shipping Ports",cluster:"logistics",n:520},{name:"Shenzhen Port Logistics",cluster:"logistics",n:280}],
-    baoan:     [{name:"Foxconn Precision (Bao'an)",cluster:"mfg",n:5240},{name:"Han's Laser Tech",cluster:"mfg",n:3640},{name:"TCL CSOT Module",cluster:"consumer",n:2840},{name:"Sunwoda Electronic",cluster:"ev",n:1420},{name:"O-Film Tech",cluster:"consumer",n:1240}],
-    longhua:   [{name:"Foxconn Hongfujin Precision",cluster:"mfg",n:7240},{name:"Han's Photonics",cluster:"mfg",n:1240},{name:"China Resources Microelec",cluster:"semi",n:820},{name:"GoerTek Optical",cluster:"consumer",n:680}],
-    longgang:  [{name:"Huawei Technologies",cluster:"telecom",n:18420},{name:"BYD Auto (Longgang)",cluster:"ev",n:4820},{name:"Huawei Hisilicon",cluster:"semi",n:6240},{name:"ZTE Microelectronics",cluster:"telecom",n:2840}],
-    pingshan:  [{name:"BYD Auto Industry",cluster:"ev",n:8420},{name:"BYD Lithium Battery",cluster:"ev",n:3240},{name:"Skyworth Auto",cluster:"ev",n:1240},{name:"Pingshan New Energy",cluster:"ev",n:680}],
-    guangming: [{name:"Mindray Biotech",cluster:"medtech",n:2840},{name:"BGI Genomics",cluster:"biotech",n:1640},{name:"Hua Astronautics Lab",cluster:"semi",n:820},{name:"Guangming Science City",cluster:"biotech",n:520}],
-    dapeng:    [{name:"BGI Marine Research",cluster:"biotech",n:420},{name:"Dapeng Eco Tech",cluster:"urban",n:240},{name:"Shenzhen Pharma Park",cluster:"medtech",n:180}],
-  };
-  return M[districtId] || [];
+  const corpus = (typeof window !== 'undefined') && window.WIPO_CORPUS;
+  const list = corpus && corpus.assignees_by_district && corpus.assignees_by_district[districtId];
+  return list || [];
 }
 
 // ─── Mount ──────────────────────────────────────────────────────────────────
