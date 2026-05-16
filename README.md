@@ -1,6 +1,8 @@
-# Semantic
+# [SEMANTIC RIVERS](https://xuanx1.github.io/szTech/) OF CHINESE TECH
 
-Innovation cluster mapping for Shenzhen patent / design / trademark filings — embeds the abstracts, clusters by meaning, and projects the clusters onto the city's 10 administrative districts as a chloropleth + scatter + flowing-river visualization.
+Innovation [cluster](https://xuanx1.github.io/szTech/) mapping for Shenzhen patent / design / trademark filings — embeds the abstracts, clusters by meaning, and projects the clusters onto the city's 10 administrative districts as a chloropleth + scatter + flowing-river visualization.
+
+<img width="1920" height="916" alt="Screenshot 2026-05-16 164051" src="https://github.com/user-attachments/assets/ad929816-02bf-4688-aeb6-2e60ec8dcf51" />
 
 ---
 
