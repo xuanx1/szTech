@@ -233,47 +233,7 @@ function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [hoverId, setHoverId] = useState(null);
   const [focusCluster, setFocusCluster] = useState(null);
-  const [neighbors, setNeighbors] = useState(window.SZ_NEIGHBORS || []);
-
-  // Fetch high-res HK / Macau / PRD city outlines at runtime. Replaces the
-  // embedded low-res fallback when Aliyun is reachable.
-  useEffect(() => {
-    (async () => {
-      const urls = [
-        "https://geo.datav.aliyun.com/areas_v3/bound/810000_full.json",
-        "https://geo.datav.aliyun.com/areas_v3/bound/820000_full.json",
-        "https://geo.datav.aliyun.com/areas_v3/bound/441900.json",
-        "https://geo.datav.aliyun.com/areas_v3/bound/441300.json",
-        "https://geo.datav.aliyun.com/areas_v3/bound/440100.json",
-        "https://geo.datav.aliyun.com/areas_v3/bound/442000.json",
-        "https://geo.datav.aliyun.com/areas_v3/bound/440400.json",
-      ];
-      const flat = [];
-      for (const u of urls) {
-        try {
-          const r = await fetch(u);
-          if (!r.ok) continue;
-          const txt = await r.text();
-          if (txt.trim().startsWith('<')) continue;
-          const j = JSON.parse(txt);
-          for (const f of j.features) {
-            const polys = f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates : [f.geometry.coordinates];
-            for (const poly of polys) {
-              const ring = poly[0];
-              if (!ring || ring.length < 5) continue;
-              let minx=Infinity,maxx=-Infinity,miny=Infinity,maxy=-Infinity;
-              for (const [x,y] of ring) {
-                if(x<minx)minx=x; if(x>maxx)maxx=x; if(y<miny)miny=y; if(y>maxy)maxy=y;
-              }
-              if ((maxx-minx) < 0.005 && (maxy-miny) < 0.005) continue;
-              flat.push(ring);
-            }
-          }
-        } catch (e) {}
-      }
-      if (flat.length > 20) setNeighbors(flat);
-    })();
-  }, []);
+  const neighbors = window.SZ_NEIGHBORS || [];
   useEffect(() => {
     // Try real CNIPA/admin-grade geojson first (Aliyun DataV publishes the
     // official Shenzhen admin boundary set as 440300_full.json — open CORS).
